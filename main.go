@@ -145,13 +145,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	//http://golang.org/src/pkg/net/http/client.go
 	req.RequestURI = ""
 
+	req.URL.Scheme = "http"
+
 	req.Header.Del("Authenticate")
 
 	delHopHeaders(req.Header)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Error proxying request for %s: %v", user, err)
+		log.Printf("Error proxying request for %s (%v): %v", user, req.URL, err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}

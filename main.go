@@ -61,17 +61,21 @@ func (a AccountServer) RequestAuth(user, pass string) (bool, error) {
 
 	u, err := a.ServerUrl.Parse("?" + val.Encode())
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("cannot encode request, %e", err)
 	}
 
 	resp, err := a.client.Get(u.String())
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("cannot request accountserver, %e", err)
 	}
 
 	var result bool
 	err = json.NewDecoder(resp.Body).Decode(&result)
-	return result, err
+	if err != nil {
+		return false, fmt.Errorf("cannot decode accountserver response, %e", err)
+	}
+
+	return result, nil
 }
 
 type Handler struct {
@@ -124,7 +128,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		ok, err = h.Accounts.RequestAuth(user, pass)
 	}
 	if err != nil {
-		log.Printf("Error: %v", err)
+		log.Printf("Error with accountserver for %s: %v", user, err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -150,7 +154,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Error: %v", err)
+		log.Printf("Error proxying request for %s: %v", user, err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -161,7 +165,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	copyHeader(w.Header(), resp.Header)
 
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		log.Printf("Error proxying response for %s: %v", user, err)
+	}
 }
 
 func serve(ctx context.Context) error {

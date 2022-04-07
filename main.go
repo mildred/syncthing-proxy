@@ -59,20 +59,17 @@ func (a AccountServer) RequestAuth(user, pass string) (bool, error) {
 	val.Add("user", user)
 	val.Add("pass", pass)
 
-	u, err := a.ServerUrl.Parse("?" + val.Encode())
+	resp, err := a.client.PostForm(a.ServerUrl.String(), val)
 	if err != nil {
-		return false, fmt.Errorf("cannot encode request, %e", err)
+		return false, fmt.Errorf("cannot request accountserver, %v", err)
 	}
 
-	resp, err := a.client.Get(u.String())
-	if err != nil {
-		return false, fmt.Errorf("cannot request accountserver, %e", err)
-	}
+	defer resp.Body.Close()
 
 	var result bool
 	err = json.NewDecoder(resp.Body).Decode(&result)
 	if err != nil {
-		return false, fmt.Errorf("cannot decode accountserver response, %e", err)
+		return false, fmt.Errorf("cannot decode accountserver response, %v", err)
 	}
 
 	return result, nil
@@ -204,7 +201,7 @@ func serve(ctx context.Context) error {
 		socket := server.Addr[5:]
 		l, err = net.Listen("unix", socket)
 		if err != nil {
-			return fmt.Errorf("cannot listen to unix socket %+v: %e", socket, err)
+			return fmt.Errorf("cannot listen to unix socket %+v: %v", socket, err)
 		}
 
 		listeners = append(listeners, l)

@@ -146,6 +146,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	req.RequestURI = ""
 
 	req.URL.Scheme = "http"
+	req.URL.Host = req.Host
 
 	req.Header.Del("Authenticate")
 

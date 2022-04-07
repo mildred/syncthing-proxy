@@ -54,7 +54,7 @@ type AccountServer struct {
 }
 
 func (a AccountServer) RequestAuth(user, pass string) (bool, error) {
-	var val url.Values
+	var val url.Values = url.Values{}
 	val.Add("req", "checkauth")
 	val.Add("user", user)
 	val.Add("pass", pass)
@@ -87,6 +87,10 @@ func NewHandler() *Handler {
 }
 
 func (h *Handler) getClient(target string) *http.Client {
+	if h.clients == nil {
+		h.clients = map[string]*http.Client{}
+	}
+
 	client := h.clients[target]
 
 	if client == nil {

@@ -1,0 +1,61 @@
+name: Release Go project
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    name: Build latest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0 # See: https://goreleaser.com/ci/actions/
+
+      - name: Set up Go 1.16
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.16
+        id: go
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@master
+        with:
+          version: latest
+          args: release --rm-dist --snapshot
+        #env:
+        #  GITHUB_TOKEN: ${{ secrets.GO_RELEASER_GITHUB_TOKEN }}
+
+      - name: Rename and compress built assets
+        run: |
+          for asset in dist/*/*; do
+            xz <"${asset}" >"${asset%/*}.xz"
+          done
+
+      - name: Construct release name
+        id: vars
+        run: |
+          lastver=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo v0.0.0)
+          lastver=${lastver%%-*}
+          echo ::set-output name=last_ver::$lastver
+          if [[ "${GITHUB_REF#refs/tags/}" = "${GITHUB_REF#refs/*/}" ]]; then
+            echo ::set-output name=prerelease::false
+            echo ::set-output name=release_name::${GITHUB_REF#refs/*/}
+          else
+            echo ::set-output name=prerelease::true
+            echo ::set-output name=release_name::${lastver}-latest-${GITHUB_REF#refs/*/}
+            git push origin +HEAD:refs/tags/${lastver}-latest-${GITHUB_REF#refs/*/}
+          fi
+
+      - name: Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "dist/*"
+          allowUpdates: true
+          prerelease: ${{ fromJson(steps.vars.outputs.prerelease) }}
+          tag: ${{ steps.vars.outputs.release_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -19,6 +19,13 @@ import (
 	"github.com/coreos/go-systemd/v22/activation"
 )
 
+// export GOFLAGS="-ldflags=-X=main.version=$(git describe --always HEAD)"
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 var l = log.Default()
 
 // Hop-by-hop headers. These are removed when sent to the backend.
@@ -161,7 +168,14 @@ func serve(ctx context.Context) error {
 	flag.StringVar(&accountServer, "a", "http://accountserver:8000", "Account Server")
 	flag.StringVar(&handler.TargetAddr, "t", "/run/syncthing/%{user}.socket", "Target unix socket to proxy")
 	flag.StringVar(&server.Addr, "l", ":8080", "Listen address and port or unix socket with \"unix:\" prefix (unless systemd socket activated)")
+	versionFlag := flag.Bool("version", false, "Show version")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("Version: %s\n", version)
+		fmt.Printf("Build: %s at %s\n", commit, date)
+		return nil
+	}
 
 	handler.Accounts.ServerUrl, err = url.Parse(accountServer)
 	if err != nil {

@@ -188,7 +188,7 @@ func serve(ctx context.Context) error {
 		return err
 	}
 
-	if len(listeners) == 0 && strings.HasPrefix(server.Addr, "unix:") {
+	if len(listeners) == 0 && (strings.HasPrefix(server.Addr, "unix:") || strings.HasPrefix(server.Addr, "unix/")) {
 		var l net.Listener
 		socket := server.Addr[5:]
 		l, err = net.Listen("unix", socket)

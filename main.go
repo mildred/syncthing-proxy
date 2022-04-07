@@ -20,6 +20,7 @@ import (
 )
 
 // export GOFLAGS="-ldflags=-X=main.version=$(git describe --always HEAD)"
+// https://goreleaser.com/cookbooks/using-main.version?h=version
 var (
 	version = "dev"
 	commit  = "none"

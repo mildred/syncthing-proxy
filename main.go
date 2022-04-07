@@ -21,6 +21,25 @@ import (
 
 var l = log.Default()
 
+// Hop-by-hop headers. These are removed when sent to the backend.
+// http://www.w3.org/Protocols/rfc2616/rfc2616-sec13.html
+var hopHeaders = []string{
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te", // canonicalized version of "TE"
+	"Trailers",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+func delHopHeaders(header http.Header) {
+	for _, h := range hopHeaders {
+		header.Del(h)
+	}
+}
+
 type AccountServer struct {
 	ServerUrl *url.URL
 	client    http.Client
@@ -109,6 +128,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	target := strings.ReplaceAll(h.TargetAddr, "%{user}", user)
 	client := h.getClient(target)
 
+	//http: Request.RequestURI can't be set in client requests.
+	//http://golang.org/src/pkg/net/http/client.go
+	req.RequestURI = ""
+
+	req.Header.Del("Authenticate")
+
+	delHopHeaders(req.Header)
+
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("Error: %v", err)
@@ -117,7 +144,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	defer resp.Body.Close()
+
+	delHopHeaders(resp.Header)
 	copyHeader(w.Header(), resp.Header)
+
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }

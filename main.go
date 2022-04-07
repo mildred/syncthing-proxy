@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/coreos/go-systemd/v22/activation"
 )
 
 var l = log.Default()
@@ -127,7 +130,7 @@ func serve(ctx context.Context) error {
 
 	flag.StringVar(&accountServer, "a", "http://accountserver:8000", "Account Server")
 	flag.StringVar(&handler.TargetAddr, "t", "/run/syncthing/%{user}.socket", "Target unix socket to proxy")
-	flag.StringVar(&server.Addr, "l", ":8080", "Listen address and port")
+	flag.StringVar(&server.Addr, "l", ":8080", "Listen address and port or unix socket with \"unix:\" prefix (unless systemd socket activated)")
 	flag.Parse()
 
 	handler.Accounts.ServerUrl, err = url.Parse(accountServer)
@@ -135,11 +138,32 @@ func serve(ctx context.Context) error {
 		return err
 	}
 
+	listeners, err := activation.Listeners()
+	if err != nil {
+		return err
+	}
+
+	if len(listeners) == 0 && strings.HasPrefix(server.Addr, "unix:") {
+		var l net.Listener
+		socket := server.Addr[5:]
+		l, err = net.Listen("unix", socket)
+		if err != nil {
+			return fmt.Errorf("cannot listen to unix socket %+v: %e", socket, err)
+		}
+
+		listeners = append(listeners, l)
+	}
+
 	server.Handler = handler
 	server.BaseContext = func(net.Listener) context.Context { return ctx }
 
 	go func() {
-		err := server.ListenAndServe()
+		var err error
+		if len(listeners) >= 1 {
+			err = server.Serve(listeners[0])
+		} else {
+			err = server.ListenAndServe()
+		}
 		if err != nil && err != http.ErrServerClosed {
 			l.Printf("listen: %+s\n", err)
 			os.Exit(1)

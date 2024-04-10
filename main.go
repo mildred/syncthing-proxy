@@ -258,29 +258,38 @@ func SleepContext(ctx context.Context, d time.Duration) error {
 }
 
 type LockData struct {
+	filename string
 	UUID string
 }
 
 func (lock *LockData) Generate() error {
 	lock.UUID = uuid.NewString()
+	//. TODO: open public port and store the public address and socket in the lock
 	return nil
 }
 
-func OpenLock(lock_file string) (*LockData, error) {
-	f, err := os.Open(lock_file)
+func (lock *LockData) Read() error {
+	f, err := os.Open(lock.filename)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	defer f.Close()
 
-	var lock LockData
-	err = json.NewDecoder(f).Decode(&lock)
+	err = json.NewDecoder(f).Decode(lock)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return &lock, nil
+	return nil
+}
+
+func OpenLock(lock_file string) (*LockData, error) {
+	lock := &LockData {
+		filename: lock_file,
+	}
+	err := lock.Read()
+	return lock, err
 }
 
 func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *LockData) error, wait func(context.Context, *LockData)) error {
@@ -331,6 +340,8 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *
 		f, err = os.OpenFile(lock_file, os.O_CREATE|os.O_EXCL, 0644)
 		
 		if err != nil {
+			// TODO: handle when lockdata destination changes
+			// stop and restart the wait function
 			if ! wait_started {
 				lock2, err := OpenLock(lock_file)
 				if err != nil {
@@ -446,6 +457,9 @@ func syncthing_serve(ctx context.Context, args []string) error {
 		}, func(ctx1 context.Context, lock *LockData) {
 			// TODO: open up unix socket and set up forward proxy to live instance
 			// close this proxy when ctx1 is cancelled
+			// Use LockData as destination address
+			// When reverse proxy fails, retry reading the LockData
+			// from file to get new addresses
 		})
 		if err != nil {
 			return err

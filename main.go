@@ -260,6 +260,7 @@ func SleepContext(ctx context.Context, d time.Duration) error {
 type LockData struct {
 	filename string
 	UUID string
+	Addresses []string
 }
 
 func (lock *LockData) Generate() error {
@@ -340,8 +341,6 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *
 		f, err = os.OpenFile(lock_file, os.O_CREATE|os.O_EXCL, 0644)
 		
 		if err != nil {
-			// TODO: handle when lockdata destination changes
-			// stop and restart the wait function
 			if ! wait_started {
 				lock2, err := OpenLock(lock_file)
 				if err != nil {

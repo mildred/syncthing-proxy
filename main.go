@@ -6,17 +6,21 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
+	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-systemd/v22/activation"
+	"github.com/google/uuid"
 )
 
 // export GOFLAGS="-ldflags=-X=main.version=$(git describe --always HEAD)"
@@ -171,23 +175,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func serve(ctx context.Context) error {
+type ServeConfig struct {
+	accountserver string
+	handler *Handler
+	server http.Server
+}
+
+func serve_dispatch(ctx context.Context, args []string) error {
 	var server http.Server
 	var accountServer string
 	var err error
 	handler := NewHandler()
 
-	flag.StringVar(&accountServer, "a", "http://accountserver:8000", "Account Server")
-	flag.StringVar(&handler.TargetAddr, "t", "/run/syncthing/%{user}.socket", "Target unix socket to proxy")
-	flag.StringVar(&server.Addr, "l", ":8080", "Listen address and port or unix socket with \"unix:\" prefix (unless systemd socket activated)")
-	versionFlag := flag.Bool("version", false, "Show version")
-	flag.Parse()
-
-	if *versionFlag {
-		fmt.Printf("Version: %s\n", version)
-		fmt.Printf("Build: %s at %s\n", commit, date)
-		return nil
-	}
+	f := flag.NewFlagSet(os.Args[0] + " [dispatch]", flag.ExitOnError)
+	f.StringVar(&accountServer, "a", "http://accountserver:8000", "Account Server")
+	f.StringVar(&handler.TargetAddr, "t", "/run/syncthing/%{user}.socket", "Target unix socket to proxy")
+	f.StringVar(&server.Addr, "l", ":8080", "Listen address and port or unix socket with \"unix:\" prefix (unless systemd socket activated)")
+	f.Parse(args)
 
 	handler.Accounts.ServerUrl, err = url.Parse(accountServer)
 	if err != nil {
@@ -246,6 +250,202 @@ func serve(ctx context.Context) error {
 	return nil
 }
 
+func SleepContext(ctx context.Context, d time.Duration) error {
+	sleep, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	<-sleep.Done()
+	return ctx.Err()
+}
+
+type LockData struct {
+	UUID string
+}
+
+func TakeLock(ctx context.Context, config_dir string, cb func(context.Context) error) error {
+	lock_file := path.Join(config_dir, "syncthing-proxy.lock")
+
+	retry_interval := 30 * time.Second
+	stale_interval := 2 * retry_interval
+	renew_interval := 15 * time.Second
+
+	var f *os.File = nil
+	var lock LockData
+	var owned atomic.Bool
+
+	owned.Store(false)
+
+	// Loop until lock file acquired
+	for f == nil {
+		// Remove stale lock
+
+		st, err := os.Stat(lock_file)
+		if err != nil {
+			if time.Since(st.ModTime()) > stale_interval {
+				// WARNING : there is a race condition just here
+				os.Remove(lock_file)
+				log.Printf("Removed stale lock file %s\n", lock_file)
+			}
+		}
+
+		// Try acquiring lock file
+		f, err = os.OpenFile(lock_file, os.O_CREATE|os.O_EXCL, 0644)
+		
+		if err != nil {
+			// TODO: open up unix socket and set up forward proxy to
+			// live instance
+			SleepContext(ctx, retry_interval)
+		}
+	}
+
+	// Lock file acquired: write UUID then close
+	func(){
+		defer f.Close()
+		owned.Store(true)
+
+		log.Printf("Lock file acquired: %s\n", lock_file)
+
+		lock.UUID = uuid.NewString()
+		json.NewEncoder(f).Encode(&lock)
+	}()
+
+	// TODO: stop helding unix socket for forward proxy
+	// TODO: open public facing proxy with encrypted transport for reverse
+	// proxy, defer closing this reverse proxy
+
+	ctx1, cancel := context.WithCancel(ctx)
+	defer cancel() // Will stop lock renewal too
+
+	// Loop to ensure lock is held continuously
+	go func(){
+		for ctx1.Err() == nil {
+			if SleepContext(ctx1, renew_interval) != nil {
+				break
+			}
+
+			f, err := os.Open(lock_file)
+			if err != nil {
+				log.Printf("Cannot read lock file %s: %e\n", lock_file, err)
+				cancel()
+				break
+			}
+
+			func() {
+				defer f.Close()
+
+				var lock2 LockData
+				err := json.NewDecoder(f).Decode(&lock2)
+				if err != nil {
+					owned.Store(false)
+					log.Printf("Cannot decode lock file %s: %e\n", lock_file, err)
+					cancel()
+					return
+				}
+
+				if lock2.UUID != lock.UUID {
+					owned.Store(false)
+					log.Printf("Lock file %s UUID mismatch: expected %s, got %s\n", lock.UUID, lock2.UUID)
+					cancel()
+					return
+				}
+
+				now := time.Now()
+				err = os.Chtimes(lock_file, now, now)
+				if err != nil {
+					log.Printf("Cannot renew lock file %s: %e\n", lock_file, err)
+					cancel()
+					return
+				}
+			}()
+		}
+	}()
+
+	// When command stops, remove lock file
+	defer func(){
+		if owned.Load() {
+			err := os.Remove(lock_file)
+			if err == nil {
+				log.Printf("Removed lock file: %s\n", lock_file)
+			} else {
+				log.Printf("Could not remove lock file %s: %e\n", lock_file, err)
+			}
+		} else {
+			log.Printf("Lock file no longer owned by us: %s\n", lock_file)
+		}
+	}()
+
+	// Run command while lock is held
+	return cb(ctx1)
+}
+
+func syncthing_serve(ctx context.Context, args []string) error {
+	f := flag.NewFlagSet(os.Args[0] + " syncthing-serve", flag.ExitOnError)
+	syncthing  := f.String("syncthing", "syncthing", "Syncthing executable")
+	config_dir := f.String("config", "", "Config directory")
+	data_dir   := f.String("data", "", "Data directory")
+	socket     := f.String("socket", "", "Socket for GUI Address (--gui-address=unix:///path/to/socket)")
+	f.Parse(args)
+
+	cmd_args := []string{
+		"--config=" + *config_dir,
+		"--data=" + *data_dir,
+		"--gui-address=unix://" + *socket,
+	}
+
+	for ctx.Err() == nil {
+		err := TakeLock(ctx, *config_dir, func(ctx1 context.Context) error {
+			cmd := exec.CommandContext(ctx1, *syncthing, append(cmd_args, f.Args()...)...)
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+
+			return cmd.Run()
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func parse_args(ctx context.Context) error {
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage of %s [OPTIONS] [COMMAND] [ARGS...]:\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(os.Stderr, "Subcommands:\n")
+		fmt.Fprintf(os.Stderr, "  dispatch (default)\n")
+		fmt.Fprintf(os.Stderr, "        Authenticate and proxy Syncthing GUI using an accountserver\n")
+		fmt.Fprintf(os.Stderr, "  syncthing-serve\n")
+		fmt.Fprintf(os.Stderr, "        Handle starting syncthing server\n")
+		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(os.Stderr, "Global Flags:\n")
+		flag.PrintDefaults()
+	}
+
+	versionFlag := flag.Bool("version", false, "Show version")
+	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("Version: %s\n", version)
+		fmt.Printf("Build: %s at %s\n", commit, date)
+		return nil
+	}
+
+	args := flag.Args()
+	var cmd string
+	if len(args) >= 1 {
+		cmd = args[0]
+	}
+
+	switch cmd {
+	case "syncthing-serve":
+		return syncthing_serve(ctx, args[1:])
+	case "dispatch":
+		return serve_dispatch(ctx, args[1:])
+	default:
+		return serve_dispatch(ctx, args)
+	}
+}
+
 func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
@@ -259,7 +459,7 @@ func main() {
 		cancel()
 	}()
 
-	if err := serve(ctx); err != nil {
-		l.Printf("failed to serve: +%v\n", err)
+	if err := parse_args(ctx); err != nil {
+		l.Printf("error: +%v\n", err)
 	}
 }

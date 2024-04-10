@@ -261,7 +261,29 @@ type LockData struct {
 	UUID string
 }
 
-func TakeLock(ctx context.Context, config_dir string, cb func(context.Context) error) error {
+func (lock *LockData) Generate() error {
+	lock.UUID = uuid.NewString()
+	return nil
+}
+
+func OpenLock(lock_file string) (*LockData, error) {
+	f, err := os.Open(lock_file)
+	if err != nil {
+		return nil, err
+	}
+
+	defer f.Close()
+
+	var lock LockData
+	err = json.NewDecoder(f).Decode(&lock)
+	if err != nil {
+		return nil, err
+	}
+
+	return &lock, nil
+}
+
+func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *LockData) error, wait func(context.Context, *LockData)) error {
 	lock_file := path.Join(config_dir, "syncthing-proxy.lock")
 
 	retry_interval := 30 * time.Second
@@ -273,6 +295,24 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context) e
 	var owned atomic.Bool
 
 	owned.Store(false)
+
+	// When command stops, remove lock file
+	defer func(){
+		if owned.Load() {
+			err := os.Remove(lock_file)
+			if err == nil {
+				log.Printf("Removed lock file: %s\n", lock_file)
+			} else {
+				log.Printf("Could not remove lock file %s: %e\n", lock_file, err)
+			}
+		} else {
+			log.Printf("Lock file no longer owned by us: %s\n", lock_file)
+		}
+	}()
+
+	wait_started := false
+	waitCtx, cancelWait := context.WithCancel(ctx)
+	defer cancelWait()
 
 	// Loop until lock file acquired
 	for f == nil {
@@ -291,26 +331,41 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context) e
 		f, err = os.OpenFile(lock_file, os.O_CREATE|os.O_EXCL, 0644)
 		
 		if err != nil {
-			// TODO: open up unix socket and set up forward proxy to
-			// live instance
+			if ! wait_started {
+				lock2, err := OpenLock(lock_file)
+				if err != nil {
+					return err
+				}
+				go wait(waitCtx, lock2)
+				wait_started = true
+			}
 			SleepContext(ctx, retry_interval)
 		}
 	}
 
 	// Lock file acquired: write UUID then close
-	func(){
+	err := func() error {
 		defer f.Close()
 		owned.Store(true)
 
 		log.Printf("Lock file acquired: %s\n", lock_file)
 
-		lock.UUID = uuid.NewString()
-		json.NewEncoder(f).Encode(&lock)
-	}()
+		err := lock.Generate()
+		if err != nil {
+			return err
+		}
 
-	// TODO: stop helding unix socket for forward proxy
-	// TODO: open public facing proxy with encrypted transport for reverse
-	// proxy, defer closing this reverse proxy
+		err = json.NewEncoder(f).Encode(&lock)
+		if err != nil {
+			return err
+		}
+		return nil
+	}()
+	if err != nil {
+		return err
+	}
+
+	cancelWait()
 
 	ctx1, cancel := context.WithCancel(ctx)
 	defer cancel() // Will stop lock renewal too
@@ -359,22 +414,8 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context) e
 		}
 	}()
 
-	// When command stops, remove lock file
-	defer func(){
-		if owned.Load() {
-			err := os.Remove(lock_file)
-			if err == nil {
-				log.Printf("Removed lock file: %s\n", lock_file)
-			} else {
-				log.Printf("Could not remove lock file %s: %e\n", lock_file, err)
-			}
-		} else {
-			log.Printf("Lock file no longer owned by us: %s\n", lock_file)
-		}
-	}()
-
 	// Run command while lock is held
-	return cb(ctx1)
+	return cb(ctx1, &lock)
 }
 
 func syncthing_serve(ctx context.Context, args []string) error {
@@ -392,13 +433,19 @@ func syncthing_serve(ctx context.Context, args []string) error {
 	}
 
 	for ctx.Err() == nil {
-		err := TakeLock(ctx, *config_dir, func(ctx1 context.Context) error {
+		err := TakeLock(ctx, *config_dir, func(ctx1 context.Context, lock *LockData) error {
+			// TODO: open public facing proxy with encrypted transport for reverse
+			// proxy, stop it when ctx1 is cancelled
+
 			cmd := exec.CommandContext(ctx1, *syncthing, append(cmd_args, f.Args()...)...)
 			cmd.Stdin = os.Stdin
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 
 			return cmd.Run()
+		}, func(ctx1 context.Context, lock *LockData) {
+			// TODO: open up unix socket and set up forward proxy to live instance
+			// close this proxy when ctx1 is cancelled
 		})
 		if err != nil {
 			return err

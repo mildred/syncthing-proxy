@@ -329,7 +329,7 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *
 		// Remove stale lock
 
 		st, err := os.Stat(lock_file)
-		if err != nil {
+		if err == nil {
 			if time.Since(st.ModTime()) > stale_interval {
 				// WARNING : there is a race condition just here
 				os.Remove(lock_file)

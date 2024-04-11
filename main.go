@@ -459,6 +459,7 @@ func syncthing_serve(ctx context.Context, args []string) error {
 			if err != nil {
 				return fmt.Errorf("error from syncthing server, %e", err)
 			}
+			return nil
 		}, func(ctx1 context.Context, lock *LockData) {
 			// TODO: open up unix socket and set up forward proxy to live instance
 			// close this proxy when ctx1 is cancelled

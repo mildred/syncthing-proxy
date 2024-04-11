@@ -344,7 +344,7 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *
 			if ! wait_started {
 				lock2, err := OpenLock(lock_file)
 				if err != nil {
-					return err
+					return fmt.Errorf("could not open lock, %e", err)
 				}
 				go wait(waitCtx, lock2)
 				wait_started = true
@@ -362,12 +362,12 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *
 
 		err := lock.Generate()
 		if err != nil {
-			return err
+			return fmt.Errorf("could not generate lock, %e", err)
 		}
 
 		err = json.NewEncoder(f).Encode(&lock)
 		if err != nil {
-			return err
+			return fmt.Errorf("could not write JSON for lock, %e", err)
 		}
 		return nil
 	}()
@@ -448,12 +448,17 @@ func syncthing_serve(ctx context.Context, args []string) error {
 			// TODO: open public facing proxy with encrypted transport for reverse
 			// proxy, stop it when ctx1 is cancelled
 
-			cmd := exec.CommandContext(ctx1, *syncthing, append(cmd_args, f.Args()...)...)
+			args := append(cmd_args, f.Args()...)
+			log.Printf("Start %s %v", *syncthing, args)
+			cmd := exec.CommandContext(ctx1, *syncthing, args...)
 			cmd.Stdin = os.Stdin
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 
-			return cmd.Run()
+			err := cmd.Run()
+			if err != nil {
+				return fmt.Errorf("error from syncthing server, %e", err)
+			}
 		}, func(ctx1 context.Context, lock *LockData) {
 			// TODO: open up unix socket and set up forward proxy to live instance
 			// close this proxy when ctx1 is cancelled
@@ -462,7 +467,7 @@ func syncthing_serve(ctx context.Context, args []string) error {
 			// from file to get new addresses
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("could not run syncthing iwithin lock, %e", err)
 		}
 	}
 	return nil

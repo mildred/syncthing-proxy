@@ -342,6 +342,7 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *
 		
 		if err != nil {
 			if ! wait_started {
+				log.Printf("Wait for lock file ready: %s\n", lock_file)
 				lock2, err := OpenLock(lock_file)
 				if err != nil {
 					return fmt.Errorf("could not open lock, %e", err)

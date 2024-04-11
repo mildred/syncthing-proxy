@@ -338,7 +338,7 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *
 		}
 
 		// Try acquiring lock file
-		f, err = os.OpenFile(lock_file, os.O_CREATE|os.O_EXCL, 0644)
+		f, err = os.OpenFile(lock_file, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0644)
 		
 		if err != nil {
 			if ! wait_started {

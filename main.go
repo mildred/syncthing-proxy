@@ -437,6 +437,7 @@ func syncthing_serve(ctx context.Context, args []string) error {
 	f.Parse(args)
 
 	cmd_args := []string{
+		"serve",
 		"--config=" + *config_dir,
 		"--data=" + *data_dir,
 		"--gui-address=unix://" + *socket,

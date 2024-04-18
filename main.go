@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"sync/atomic"
 	"time"
+	"bytes"
 
 	"github.com/coreos/go-systemd/v22/activation"
 	"github.com/google/uuid"
@@ -58,6 +59,11 @@ type AccountServer struct {
 }
 
 func (a AccountServer) RequestAuth(user, pass string) (bool, error) {
+	if user == "" {
+		return false, nil
+	}
+	// return true, nil // disable authserver for dev
+
 	var val url.Values = url.Values{}
 	val.Add("req", "checkauth")
 	val.Add("user", user)
@@ -82,21 +88,29 @@ func (a AccountServer) RequestAuth(user, pass string) (bool, error) {
 type Handler struct {
 	Accounts   AccountServer
 	TargetAddr string
+	filestash  bool
 	clients    map[string]*http.Client
+	password   string
 }
 
-func NewHandler() *Handler {
+func NewHandler(filestash bool) *Handler {
 	return &Handler{
+		filestash: filestash,
 		clients: map[string]*http.Client{},
 	}
 }
 
-func (h *Handler) getClient(target string) *http.Client {
+func (h *Handler) getClient(scope, target string) *http.Client {
+	if target == "" || strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		return http.DefaultClient
+	}
+
+	key := url.QueryEscape(scope) + "&" + target
 	if h.clients == nil {
 		h.clients = map[string]*http.Client{}
 	}
 
-	client := h.clients[target]
+	client := h.clients[key]
 
 	if client == nil {
 		client = &http.Client{
@@ -107,7 +121,8 @@ func (h *Handler) getClient(target string) *http.Client {
 				},
 			},
 		}
-		h.clients[target] = client
+		h.clients[key] = client
+		// TODO: memory leak
 	}
 
 	return client
@@ -141,16 +156,192 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Reverse proxy
 	target := strings.ReplaceAll(h.TargetAddr, "%{user}", user)
-	client := h.getClient(target)
+	client := h.getClient("", target)
 
+	target_url := target
+	if !strings.HasPrefix(target_url, "http://") && !strings.HasPrefix(target_url, "https://")  {
+		target_url = "http://" + req.URL.Host
+	}
+
+	if h.filestash {
+		err := filestash_authenticate(w, req, *client, target_url, map[string]string{
+			"user": user,
+			"password": h.password,
+		})
+		if err != nil {
+			log.Printf("Error decoding underlying session: %v", err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if h.filestash && req.URL.Path == "/api/session" && req.Method != http.MethodGet {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	} else {
+		// Reverse proxy
+		u, err := url.Parse(target_url)
+		if err != nil {
+			log.Printf("Error cannot parse URL %s: %v", target_url, err)
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		proxy_request(w, req, u, user, client)
+	}
+}
+
+type FilestashApiSessionResponse struct {
+	Status  string                             `json:"status"`
+	Message *string                            `json:"message"`
+	Result  *FilestashApiSessionResponseResult `json:"result"`
+}
+
+type FilestashApiSessionResponseResult struct {
+	Home            string `json:"home"`
+	IsAuthenticated bool   `json:"is_authenticated"`
+	BackendID       string `json:"backendID"`
+}
+
+func filestash_authenticate(w http.ResponseWriter, req *http.Request, client http.Client, target string, auth_info map[string]string) error {
+	var response FilestashApiSessionResponse
+
+	// Do not follow redirects
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	var cookies []*http.Cookie
+	for _, cookie := range req.Cookies() {
+		if cookie.Name != "ssoref" {
+			cookies = append(cookies, cookie)
+		}
+	}
+
+	// Check session opened
+
+	sess_req, err := http.NewRequest(http.MethodGet, target + "/api/session", nil)
+	if err != nil {
+		return err
+	}
+	for _, cookie := range cookies {
+		log.Printf("GET /api/session Cookie: %+v", cookie)
+		sess_req.AddCookie(cookie)
+	}
+	sess_req.Header.Add("X-Requested-With", "XmlHttpRequest")
+
+	res, err := client.Do(sess_req)
+	if err != nil {
+		return err
+	}
+
+	err = json.NewDecoder(res.Body).Decode(&response)
+	res.Body.Close()
+	if err != nil {
+		return err
+	}
+
+	if response.Status == "ok" && response.Result != nil && response.Result.IsAuthenticated {
+		return nil
+	}
+
+	// Open session
+
+	//content_type := "application/json"
+	//request, err := json.Marshal(auth_info)
+	//if err != nil {
+	//	return err
+	//}
+
+	data := url.Values{}
+	for k, v := range auth_info {
+		data.Set(k, v)
+	}
+	request := data.Encode()
+	content_type := "application/x-www-form-urlencoded"
+
+	log.Printf("POST %s/api/session/auth/: %s", target, string(request))
+
+	sess_req, err = http.NewRequest(http.MethodPost, target + "/api/session/auth/", bytes.NewReader([]byte(request)))
+	if err != nil {
+		return err
+	}
+	sess_req.Header.Set("Content-Type", content_type)
+	sess_req.AddCookie(&http.Cookie{
+		Name:     "ssoref",
+		Value:    "local::",
+	})
+
+	sess_req.Header.Add("X-Requested-With", "XmlHttpRequest")
+
+	res, err = client.Do(sess_req)
+	if err != nil {
+		return err
+	}
+
+	// handle res2 and forward cookies, should work with client.CookieJar if set
+	for _, cookie := range res.Cookies() {
+		if cookie.Name != "ssoref" {
+			http.SetCookie(w, cookie)
+			log.Printf("POST /api/session/auth Set-Cookie: %+v", cookie)
+			cookies = append(cookies, cookie)
+		}
+	}
+	body, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		return err
+	}
+
+	log.Printf("POST %s/api/session/auth/ %v: %s", target, res.StatusCode, string(body))
+
+	// Check session opened
+
+	sess_req, err = http.NewRequest(http.MethodGet, target + "/api/session", nil)
+	if err != nil {
+		return err
+	}
+	for _, cookie := range cookies {
+		log.Printf("GET /api/session Cookie: %+v", cookie)
+		sess_req.AddCookie(cookie)
+	}
+
+	sess_req.Header.Add("X-Requested-With", "XmlHttpRequest")
+
+	res, err = client.Do(sess_req)
+	if err != nil {
+		return err
+	}
+
+	text_res, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		return err
+	}
+	log.Printf("GET /api/session %v: %s", res.StatusCode, text_res)
+
+	response = FilestashApiSessionResponse{}
+	err = json.NewDecoder(bytes.NewReader([]byte(text_res))).Decode(&response)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("GET /api/session: %+v", response)
+
+	if response.Status == "ok" && response.Result != nil && response.Result.IsAuthenticated {
+		return nil
+	}
+
+	return fmt.Errorf("Could not authenticate")
+}
+
+func proxy_request(w http.ResponseWriter, req *http.Request, target_url *url.URL, user string, client *http.Client) {
 	//http: Request.RequestURI can't be set in client requests.
 	//http://golang.org/src/pkg/net/http/client.go
 	req.RequestURI = ""
 
 	req.URL.Scheme = "http"
-	req.URL.Host = req.Host
+	req.URL.Host = target_url.Host
 
 	req.Header.Del("Authenticate")
 
@@ -185,12 +376,82 @@ func serve_dispatch(ctx context.Context, args []string) error {
 	var server http.Server
 	var accountServer string
 	var err error
-	handler := NewHandler()
+	handler := NewHandler(false)
 
 	f := flag.NewFlagSet(os.Args[0] + " [dispatch]", flag.ExitOnError)
 	f.StringVar(&accountServer, "a", "http://accountserver:8000", "Account Server")
 	f.StringVar(&handler.TargetAddr, "t", "/run/syncthing/%{user}.socket", "Target unix socket to proxy")
 	f.StringVar(&server.Addr, "l", ":8080", "Listen address and port or unix socket with \"unix:\" prefix (unless systemd socket activated)")
+	f.Parse(args)
+
+	handler.Accounts.ServerUrl, err = url.Parse(accountServer)
+	if err != nil {
+		return err
+	}
+
+	listeners, err := activation.Listeners()
+	if err != nil {
+		return err
+	}
+
+	if len(listeners) == 0 && (strings.HasPrefix(server.Addr, "unix:") || strings.HasPrefix(server.Addr, "unix/")) {
+		var l net.Listener
+		socket := server.Addr[5:]
+		l, err = net.Listen("unix", socket)
+		if err != nil {
+			return fmt.Errorf("cannot listen to unix socket %+v: %v", socket, err)
+		}
+
+		listeners = append(listeners, l)
+	}
+
+	server.Handler = handler
+	server.BaseContext = func(net.Listener) context.Context { return ctx }
+
+	go func() {
+		var err error
+		if len(listeners) >= 1 {
+			err = server.Serve(listeners[0])
+		} else {
+			err = server.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
+			l.Printf("listen: %+s\n", err)
+			os.Exit(1)
+		}
+	}()
+
+	l.Printf("Starting server on %v", server.Addr)
+	<-ctx.Done()
+	l.Printf("Stopping server")
+
+	// Stoping server
+
+	ctxShutDown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		cancel()
+	}()
+
+	err = server.Shutdown(ctxShutDown)
+	if err != nil && err != http.ErrServerClosed {
+		return err
+	}
+
+	l.Printf("Server stopped")
+	return nil
+}
+
+func serve_dispatch_filestash(ctx context.Context, args []string) error {
+	var server http.Server
+	var accountServer string
+	var err error
+	handler := NewHandler(true)
+
+	f := flag.NewFlagSet(os.Args[0] + " dispatch-filestash", flag.ExitOnError)
+	f.StringVar(&accountServer, "a", "http://accountserver:8000", "Account Server")
+	f.StringVar(&handler.TargetAddr, "t", "", "Target unix socket or URL to proxy to")
+	f.StringVar(&server.Addr, "l", ":8080", "Listen address and port or unix socket with \"unix:\" prefix (unless systemd socket activated)")
+	f.StringVar(&handler.password, "p", "", "Password to pass to filestash (LOCAL backend with PASSTHROUGH username_and_password)")
 	f.Parse(args)
 
 	handler.Accounts.ServerUrl, err = url.Parse(accountServer)
@@ -480,8 +741,10 @@ func parse_args(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "Usage of %s [OPTIONS] [COMMAND] [ARGS...]:\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "Subcommands:\n")
-		fmt.Fprintf(os.Stderr, "  dispatch (default)\n")
+		fmt.Fprintf(os.Stderr, "  dispatch\n")
 		fmt.Fprintf(os.Stderr, "        Authenticate and proxy Syncthing GUI using an accountserver\n")
+		fmt.Fprintf(os.Stderr, "  dispatch-filestash\n")
+		fmt.Fprintf(os.Stderr, "        Authenticate and proxy Filestash using an accountserver\n")
 		fmt.Fprintf(os.Stderr, "  syncthing-serve\n")
 		fmt.Fprintf(os.Stderr, "        Handle starting syncthing server\n")
 		fmt.Fprintf(os.Stderr, "\n")
@@ -509,6 +772,8 @@ func parse_args(ctx context.Context) error {
 		return syncthing_serve(ctx, args[1:])
 	case "dispatch":
 		return serve_dispatch(ctx, args[1:])
+	case "dispatch-filestash":
+		return serve_dispatch_filestash(ctx, args[1:])
 	default:
 		return serve_dispatch(ctx, args)
 	}

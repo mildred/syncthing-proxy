@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"path"
 	"log"
 	"net"
 	"net/http"
@@ -14,11 +14,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"strings"
-	"syscall"
 	"sync/atomic"
+	"syscall"
 	"time"
-	"bytes"
 
 	"github.com/coreos/go-systemd/v22/activation"
 	"github.com/google/uuid"
@@ -96,7 +96,7 @@ type Handler struct {
 func NewHandler(filestash bool) *Handler {
 	return &Handler{
 		filestash: filestash,
-		clients: map[string]*http.Client{},
+		clients:   map[string]*http.Client{},
 	}
 }
 
@@ -160,13 +160,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	client := h.getClient("", target)
 
 	target_url := target
-	if !strings.HasPrefix(target_url, "http://") && !strings.HasPrefix(target_url, "https://")  {
+	if !strings.HasPrefix(target_url, "http://") && !strings.HasPrefix(target_url, "https://") {
 		target_url = "http://" + req.URL.Host
+		log.Printf("Forward requests to %v (rewritten)", target_url)
+	} else {
+		log.Printf("Forward requests to %v", target_url)
 	}
 
 	if h.filestash {
 		err := filestash_authenticate(w, req, *client, target_url, map[string]string{
-			"user": user,
+			"user":     user,
 			"password": h.password,
 		})
 		if err != nil {
@@ -220,7 +223,7 @@ func filestash_authenticate(w http.ResponseWriter, req *http.Request, client htt
 
 	// Check session opened
 
-	sess_req, err := http.NewRequest(http.MethodGet, target + "/api/session", nil)
+	sess_req, err := http.NewRequest(http.MethodGet, target+"/api/session", nil)
 	if err != nil {
 		return err
 	}
@@ -262,14 +265,14 @@ func filestash_authenticate(w http.ResponseWriter, req *http.Request, client htt
 
 	log.Printf("POST %s/api/session/auth/: %s", target, string(request))
 
-	sess_req, err = http.NewRequest(http.MethodPost, target + "/api/session/auth/", bytes.NewReader([]byte(request)))
+	sess_req, err = http.NewRequest(http.MethodPost, target+"/api/session/auth/", bytes.NewReader([]byte(request)))
 	if err != nil {
 		return err
 	}
 	sess_req.Header.Set("Content-Type", content_type)
 	sess_req.AddCookie(&http.Cookie{
-		Name:     "ssoref",
-		Value:    "local::",
+		Name:  "ssoref",
+		Value: "local::",
 	})
 
 	sess_req.Header.Add("X-Requested-With", "XmlHttpRequest")
@@ -297,7 +300,7 @@ func filestash_authenticate(w http.ResponseWriter, req *http.Request, client htt
 
 	// Check session opened
 
-	sess_req, err = http.NewRequest(http.MethodGet, target + "/api/session", nil)
+	sess_req, err = http.NewRequest(http.MethodGet, target+"/api/session", nil)
 	if err != nil {
 		return err
 	}
@@ -368,8 +371,8 @@ func proxy_request(w http.ResponseWriter, req *http.Request, target_url *url.URL
 
 type ServeConfig struct {
 	accountserver string
-	handler *Handler
-	server http.Server
+	handler       *Handler
+	server        http.Server
 }
 
 func serve_dispatch(ctx context.Context, args []string) error {
@@ -378,7 +381,7 @@ func serve_dispatch(ctx context.Context, args []string) error {
 	var err error
 	handler := NewHandler(false)
 
-	f := flag.NewFlagSet(os.Args[0] + " [dispatch]", flag.ExitOnError)
+	f := flag.NewFlagSet(os.Args[0]+" [dispatch]", flag.ExitOnError)
 	f.StringVar(&accountServer, "a", "http://accountserver:8000", "Account Server")
 	f.StringVar(&handler.TargetAddr, "t", "/run/syncthing/%{user}.socket", "Target unix socket to proxy")
 	f.StringVar(&server.Addr, "l", ":8080", "Listen address and port or unix socket with \"unix:\" prefix (unless systemd socket activated)")
@@ -447,7 +450,7 @@ func serve_dispatch_filestash(ctx context.Context, args []string) error {
 	var err error
 	handler := NewHandler(true)
 
-	f := flag.NewFlagSet(os.Args[0] + " dispatch-filestash", flag.ExitOnError)
+	f := flag.NewFlagSet(os.Args[0]+" dispatch-filestash", flag.ExitOnError)
 	f.StringVar(&accountServer, "a", "http://accountserver:8000", "Account Server")
 	f.StringVar(&handler.TargetAddr, "t", "", "Target unix socket or URL to proxy to")
 	f.StringVar(&server.Addr, "l", ":8080", "Listen address and port or unix socket with \"unix:\" prefix (unless systemd socket activated)")
@@ -519,8 +522,8 @@ func SleepContext(ctx context.Context, d time.Duration) error {
 }
 
 type LockData struct {
-	filename string
-	UUID string
+	filename  string
+	UUID      string
 	Addresses []string
 }
 
@@ -547,7 +550,7 @@ func (lock *LockData) Read() error {
 }
 
 func OpenLock(lock_file string) (*LockData, error) {
-	lock := &LockData {
+	lock := &LockData{
 		filename: lock_file,
 	}
 	err := lock.Read()
@@ -568,7 +571,7 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *
 	owned.Store(false)
 
 	// When command stops, remove lock file
-	defer func(){
+	defer func() {
 		if owned.Load() {
 			err := os.Remove(lock_file)
 			if err == nil {
@@ -600,9 +603,9 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *
 
 		// Try acquiring lock file
 		f, err = os.OpenFile(lock_file, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0644)
-		
+
 		if err != nil {
-			if ! wait_started {
+			if !wait_started {
 				log.Printf("Wait for lock file ready: %s\n", lock_file)
 				lock2, err := OpenLock(lock_file)
 				if err != nil {
@@ -643,7 +646,7 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *
 	defer cancel() // Will stop lock renewal too
 
 	// Loop to ensure lock is held continuously
-	go func(){
+	go func() {
 		for ctx1.Err() == nil {
 			if SleepContext(ctx1, renew_interval) != nil {
 				break
@@ -691,11 +694,11 @@ func TakeLock(ctx context.Context, config_dir string, cb func(context.Context, *
 }
 
 func syncthing_serve(ctx context.Context, args []string) error {
-	f := flag.NewFlagSet(os.Args[0] + " syncthing-serve", flag.ExitOnError)
-	syncthing  := f.String("syncthing", "syncthing", "Syncthing executable")
+	f := flag.NewFlagSet(os.Args[0]+" syncthing-serve", flag.ExitOnError)
+	syncthing := f.String("syncthing", "syncthing", "Syncthing executable")
 	config_dir := f.String("config", "", "Config directory")
-	data_dir   := f.String("data", "", "Data directory")
-	socket     := f.String("socket", "", "Socket for GUI Address (--gui-address=unix:///path/to/socket)")
+	data_dir := f.String("data", "", "Data directory")
+	socket := f.String("socket", "", "Socket for GUI Address (--gui-address=unix:///path/to/socket)")
 	f.Parse(args)
 
 	cmd_args := []string{

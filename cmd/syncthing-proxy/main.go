@@ -162,7 +162,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	target_url := target
 	if !strings.HasPrefix(target_url, "http://") && !strings.HasPrefix(target_url, "https://") {
 		target_url = "http://" + req.Host
-		log.Printf("Forward requests to %v (rewritten from %v)", target_url, req.Host)
 	}
 
 	if h.filestash {
